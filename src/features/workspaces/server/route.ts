@@ -7,6 +7,8 @@ import { ID, Query } from "node-appwrite";
 import { MemberRoles } from "@/features/members/types";
 import { generateInviteCode } from "@/lib/utils";
 import { getMember } from "@/features/members/utils";
+import z from "zod";
+import { Workspace } from "../types";
 
 const app = new Hono()
   .get("/", sessionMiddleware, async (c) => {
@@ -156,6 +158,78 @@ const app = new Hono()
     });
 
     return c.json({ data: { $id: workspaceId } });
-  });
+  })
+  .post("/:workspaceId/reset-invite-code", sessionMiddleware, async (c) => {
+    const databases = c.get("databases");
+    const user = c.get("user");
+
+    const { workspaceId } = c.req.param();
+
+    const member = await getMember({
+      databases,
+      workspaceId,
+      userId: user.$id,
+    });
+
+    if (!member || member.role !== MemberRoles.ADMIN) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+
+    const workspace = await databases.updateDocument({
+      databaseId: DATABASE_ID,
+      collectionId: WORKSPACES_ID,
+      documentId: workspaceId,
+      data: {
+        inviteCode: generateInviteCode(6),
+      },
+    });
+
+    return c.json({ data: workspace });
+  })
+  .post(
+    "/:workspaceId/join",
+    sessionMiddleware,
+    zValidator("json", z.object({ code: z.string() })),
+    async (c) => {
+      const { workspaceId } = c.req.param();
+      const { code } = c.req.valid("json");
+
+      const databases = c.get("databases");
+      const user = c.get("user");
+
+      const member = await getMember({
+        databases,
+        workspaceId,
+        userId: user.$id,
+      });
+
+      if (member) {
+        return c.json({ error: "Already a member" }, 400);
+      }
+
+      const workspace = await databases.getDocument<Workspace>({
+        databaseId: DATABASE_ID,
+        collectionId: WORKSPACES_ID,
+        documentId: workspaceId,
+      });
+
+      if (workspace.inviteCode !== code) {
+        return c.json({ error: "Invalid invite code" }, 400);
+      }
+
+      await databases.createDocument({
+        databaseId: DATABASE_ID,
+        collectionId: MEMBERS_ID,
+        documentId: ID.unique(),
+        data: {
+          workspaceId,
+          userId: user.$id,
+          role: MemberRoles.MEMBER,
+        },
+      });
+
+      return c.json({ data: workspace });
+    }
+  );
 
 export default app;
